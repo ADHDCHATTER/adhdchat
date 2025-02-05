@@ -1,67 +1,63 @@
-from fastapi import FastAPI, Request, Form, Depends
-from twilio.twiml.messaging_response import MessagingResponse
+from fastapi import FastAPI, WebSocket
 import uvicorn
-import time
 import re
 
 app = FastAPI()
 
-# ADHD Screening Questions
+@app.get("/")
+def home():
+    return {"message": "Server is running!"}
+
 questions = [
-    "Do you frequently lose focus on tasks, even ones you enjoy? (Yes/No)",
-    "Do you misplace important things like keys, phone, or wallet often? (Yes/No)",
-    "Do you struggle to complete tasks before jumping to new ones? (Yes/No)",
-    "Have you experienced these symptoms since childhood? (Yes/No)",
-    "Do you feel restless or struggle to relax? (Yes/No)"
+    "Do you frequently lose focus on tasks, even ones you enjoy?",
+    "Do you misplace important things like keys, phone, or wallet often?",
+    "Do you struggle to complete tasks before jumping to new ones?",
+    "Have you experienced these symptoms since childhood?",
+    "Do you feel restless or struggle to relax?"
 ]
 
-user_sessions = {}  # Store user conversations
+user_sessions = {}
 
-SESSION_TIMEOUT = 600  # 10 minutes (in seconds)
+@app.websocket("/chat")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    user_id = websocket.client
 
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {"current_q": 0, "responses": []}
 
-@app.post("/whatsapp")
-async def whatsapp_webhook(request: Request):
-    form_data = await request.form()
-    user_message = form_data.get("Body", "").strip().lower()
-    user_number = form_data.get("From")
+    session = user_sessions[user_id]
 
-    # If user is new or session expired, reset session
-    if user_number not in user_sessions or time.time() - user_sessions[user_number]["timestamp"] > SESSION_TIMEOUT:
-        user_sessions[user_number] = {"current_q": 0, "responses": [], "timestamp": time.time()}
+    await websocket.send_text("Hello! Answer Yes or No to the following questions.")
 
-    session = user_sessions[user_number]
-    response = MessagingResponse()
+    while session["current_q"] < len(questions):
+        question = questions[session["current_q"]]
+        await websocket.send_text(question)
 
-    # Normalize Yes/No responses
-    yes_patterns = re.compile(r"^(yes|yep|yup|yeah|sure|ok|okay|yea|affirmative)\b", re.IGNORECASE)
-    no_patterns = re.compile(r"^(no|nope|nah|never|negative)\b", re.IGNORECASE)
+        user_response = await websocket.receive_text()
+        user_response = user_response.strip().lower()
 
-    if session["current_q"] < len(questions):
-        if yes_patterns.match(user_message):
+        yes_patterns = re.compile(r"^(yes|yep|yeah|y|sure|ok)\b", re.IGNORECASE)
+        no_patterns = re.compile(r"^(no|nope|nah|n|never)\b", re.IGNORECASE)
+
+        if yes_patterns.match(user_response):
             session["responses"].append("yes")
-        elif no_patterns.match(user_message):
+        elif no_patterns.match(user_response):
             session["responses"].append("no")
-        elif session["current_q"] > 0:  # If mid-convo and invalid response
-            response.message("Please respond with Yes or No.")
-            return response.to_xml()
-
-        response.message(questions[session["current_q"]])
-        session["current_q"] += 1
-        session["timestamp"] = time.time()  # Update last activity timestamp
-
-    else:
-        adhd_risk = session["responses"].count("yes")
-        if adhd_risk >= 3:
-            response.message("Your responses indicate possible ADHD symptoms. Consider speaking with a specialist.")
         else:
-            response.message("Your responses do not strongly indicate ADHD, but if you're struggling, speaking with a professional might help.")
+            await websocket.send_text("Please respond with Yes or No.")
+            continue
 
-        # Remove session after completion
-        del user_sessions[user_number]
+        session["current_q"] += 1
 
-    return response.to_xml()
+    adhd_risk = session["responses"].count("yes")
+    if adhd_risk >= 3:
+        await websocket.send_text("Your responses indicate possible ADHD symptoms. Consider speaking with a specialist.")
+    else:
+        await websocket.send_text("Your responses do not strongly indicate ADHD, but if you're struggling, speaking with a professional might help.")
 
+    await websocket.close()
+    del user_sessions[user_id]
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
